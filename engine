@@ -1,0 +1,133 @@
+const fs = require('fs');
+const path = require('path');
+const yaml = require('js-yaml');
+const DeviceInstance = require('./device-instance');
+const WsTransport = require('./ws-transport');
+
+class SimulatorEngine {
+
+  constructor(config) {
+    this.config = config;
+    /** @type {Map<string, DeviceInstance>} */
+    this.devices = new Map();
+    /** @type {Map<string, object>} — cached definitions */
+    this.definitions = new Map();
+    this.transport = new WsTransport(config.backendWsUrl);
+    this.intervalHandle = null;
+    this.commandPollHandle = null;
+    this._tickCount = 0;
+  }
+
+  async init() {
+    // 1. Wczytaj fleet
+    const fleetPath = path.resolve(process.cwd(), this.config.fleetFile);
+    if (!fs.existsSync(fleetPath)) {
+      throw new Error(`Fleet file not found: ${fleetPath}`);
+    }
+    const fleet = yaml.load(fs.readFileSync(fleetPath, 'utf8'));
+
+    console.log('═══════════════════════════════════════════');
+    console.log('  DER Simulator Engine');
+    console.log('═══════════════════════════════════════════');
+    console.log(`  Backend WS: ${this.config.backendWsUrl}`);
+    console.log(`  Interval:   ${this.config.intervalMs}ms`);
+    console.log('');
+
+    // 2. Połącz z backendem
+    await this.transport.connect();
+
+    // 3. Obsługa komend przychodzących
+    this.transport.onCommands = (commands) => {
+      for (const cmd of commands) {
+        const instance = this.devices.get(cmd.deviceId);
+        if (!instance) {
+          this.transport.sendCommandResult(cmd.id, 'error', `Device ${cmd.deviceId} not found in simulator`);
+          continue;
+        }
+        const result = instance.handleCommand(cmd.command, cmd.params);
+        this.transport.sendCommandResult(cmd.id, result.status, result.result);
+        console.log(`  📨 [${cmd.deviceId}] ${cmd.command} → ${result.status}: ${result.result}`);
+      }
+    };
+
+    // 4. Twórz instancje
+    for (const entry of fleet.fleet) {
+      const { type, count, network, idPrefix } = entry;
+      const def = this._loadDefinition(type);
+
+      console.log(`📋 ${def.metadata.deviceType} (${def.metadata.protocol}) × ${count}`);
+
+      for (let i = 0; i < count; i++) {
+        const deviceId = `${idPrefix}-${String(i + 1).padStart(3, '0')}`;
+        const instance = new DeviceInstance(deviceId, def, i, network);
+        this.devices.set(deviceId, instance);
+
+        // Rejestruj w backendzie
+        this.transport.registerDevice(deviceId, instance.getRegistrationMeta());
+      }
+    }
+
+    console.log('');
+    console.log(`🔌 Total devices: ${this.devices.size}`);
+    console.log('═══════════════════════════════════════════');
+  }
+
+  start() {
+    console.log(`\n▶️  Simulation running\n`);
+
+    // Telemetria
+    this.intervalHandle = setInterval(() => this._tick(), this.config.intervalMs);
+    this._tick(); // pierwszy tick natychmiast
+
+    // Polling komend co 2s
+    this.commandPollHandle = setInterval(() => {
+      const deviceIds = Array.from(this.devices.keys());
+      // Poll w batchach po 50
+      for (let i = 0; i < deviceIds.length; i += 50) {
+        this.transport.pollCommandsBatch(deviceIds.slice(i, i + 50));
+      }
+    }, 2000);
+  }
+
+  stop() {
+    if (this.intervalHandle) clearInterval(this.intervalHandle);
+    if (this.commandPollHandle) clearInterval(this.commandPollHandle);
+    this.transport.destroy();
+    console.log('\n⏹️  Simulation stopped');
+  }
+
+  _tick() {
+    this._tickCount++;
+    const items = [];
+
+    for (const [deviceId, instance] of this.devices) {
+      const data = instance.tick();
+      items.push({ deviceId, data });
+    }
+
+    // Wyślij batchem
+    const BATCH = 100;
+    for (let i = 0; i < items.length; i += BATCH) {
+      this.transport.sendTelemetryBatch(items.slice(i, i + BATCH));
+    }
+
+    // Log
+    if (this._tickCount % 10 === 0 || this.config.logLevel === 'debug') {
+      const now = new Date().toISOString().slice(11, 19);
+      console.log(`[${now}] tick #${this._tickCount} — ${items.length} devices`);
+    }
+  }
+
+  _loadDefinition(type) {
+    if (this.definitions.has(type)) return this.definitions.get(type);
+    const defPath = path.resolve(process.cwd(), 'definitions', `${type}.yaml`);
+    if (!fs.existsSync(defPath)) {
+      throw new Error(`Definition not found: ${defPath}. Create definitions/${type}.yaml`);
+    }
+    const def = yaml.load(fs.readFileSync(defPath, 'utf8'));
+    this.definitions.set(type, def);
+    return def;
+  }
+}
+
+module.exports = SimulatorEngine;
