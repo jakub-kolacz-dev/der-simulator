@@ -1,0 +1,105 @@
+# Profil: realistyczne ładowanie AC 3-fazowe 11kW / 22kW
+# Krzywa: stała moc → tapering po SoC 80% → trickle na końcu
+name: evse-ac-charging
+description: "Realistic AC charging session (CC/CV profile)"
+appliesTo:
+  deviceType: EVSE
+  states: [Charging]
+
+# Każde pole telemetrii może mieć swoją krzywą
+curves:
+  current_A:
+    # Krzywa bazowana na SoC (jeśli dostępny) lub na czasie od wejścia w stan
+    driver: soc_percent    # pole które "kieruje" krzywą
+    points:
+      #  driver_value → output_value
+      - at: 0
+        value: 32
+      - at: 20
+        value: 32
+      - at: 50
+        value: 32
+      - at: 70
+        value: 30
+      - at: 80
+        value: 24
+      - at: 85
+        value: 18
+      - at: 90
+        value: 12
+      - at: 95
+        value: 6
+      - at: 98
+        value: 3
+      - at: 100
+        value: 0.5
+    interpolation: linear
+
+  voltage_V:
+    driver: soc_percent
+    points:
+      - at: 0
+        value: 228
+      - at: 50
+        value: 230
+      - at: 80
+        value: 232
+      - at: 100
+        value: 234
+    interpolation: linear
+
+  soc_percent:
+    driver: time_in_state_s
+    points:
+      - at: 0
+        value: 15       # typowy start ładowania
+      - at: 1800
+        value: 40
+      - at: 3600
+        value: 60
+      - at: 5400
+        value: 75
+      - at: 7200
+        value: 85
+      - at: 9000
+        value: 92
+      - at: 10800
+        value: 97
+      - at: 12600
+        value: 100
+    interpolation: linear
+
+  temperature_C:
+    driver: time_in_state_s
+    points:
+      - at: 0
+        value: 25
+      - at: 1800
+        value: 35
+      - at: 3600
+        value: 42
+      - at: 7200
+        value: 48
+      - at: 10800
+        value: 38      # stygnie na końcu
+    interpolation: linear
+
+# Szum — dodawany do wartości z krzywej
+noise:
+  voltage_V:
+    amplitude: 1.5       # ± 1.5V
+    drift: 0.3           # wolny drift (sinusoida)
+    driftPeriodS: 120    # okres driftu
+    spikeProbability: 0.01
+    spikeAmplitude: 5
+  current_A:
+    amplitude: 0.3
+    drift: 0.1
+    driftPeriodS: 60
+  temperature_C:
+    amplitude: 0.5
+    drift: 0.2
+    driftPeriodS: 300
+  soc_percent:
+    amplitude: 0          # SoC nie skacze losowo
+    drift: 0
