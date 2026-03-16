@@ -1,0 +1,107 @@
+const TelemetryGenerator = require('./telemetry-generator');
+
+class DeviceInstance {
+
+  constructor(deviceId, definition, instanceIndex, network) {
+    this.deviceId = deviceId;
+    this.definition = definition;
+    this.meta = definition.metadata;
+    this.network = network;
+    this.instanceIndex = instanceIndex;
+
+    this.state = definition.states.initial;
+    this.previousState = this.state;
+
+    this.telemetryGen = new TelemetryGenerator(definition.telemetry);
+    this.commandDefs = definition.commands || {};
+
+    this.lastTickAt = Date.now();
+  }
+
+  getRegistrationMeta() {
+    return {
+      deviceType: this.meta.deviceType,
+      description: this.meta.description,
+      protocol: this.meta.protocol,
+      manufacturer: this.meta.manufacturer,
+      network: this.network,
+      instanceIndex: this.instanceIndex,
+    };
+  }
+
+  tick() {
+    const now = Date.now();
+    const deltaMs = now - this.lastTickAt;
+    this.lastTickAt = now;
+
+    this._transitionState();
+
+    const telemetry = this.telemetryGen.generate(this.state, deltaMs);
+    telemetry._state = this.state;
+    telemetry._deviceType = this.meta.deviceType;
+    telemetry._protocol = this.meta.protocol;
+    telemetry._network = this.network;
+    telemetry._timestamp = new Date(now).toISOString();
+
+    return telemetry;
+  }
+
+  handleCommand(commandName, params) {
+    const cmdDef = this.commandDefs[commandName];
+    if (!cmdDef) {
+      return { status: 'error', result: `Unknown command: ${commandName}` };
+    }
+
+    if (cmdDef.validFromStates && !cmdDef.validFromStates.includes(this.state)) {
+      return {
+        status: 'rejected',
+        result: `"${commandName}" invalid in state "${this.state}". Valid: ${cmdDef.validFromStates.join(', ')}`,
+      };
+    }
+
+    if (cmdDef.transitionTo) {
+      this.previousState = this.state;
+      this.state = cmdDef.transitionTo;
+    }
+
+    if (cmdDef.effect && params) {
+      const paramName = cmdDef.effect.param;
+      if (cmdDef.effect.setMax && params.value !== undefined) {
+        this.telemetryGen.applyOverride(paramName, { setMax: params.value });
+      }
+    }
+
+    return {
+      status: 'ok',
+      result: `${commandName}: ${this.previousState} → ${this.state}`,
+    };
+  }
+
+  _transitionState() {
+    const statesDef = this.definition.states;
+
+    // Losowy fault
+    if (
+      statesDef.faultProbability &&
+      statesDef.faultFromStates?.includes(this.state) &&
+      Math.random() < statesDef.faultProbability
+    ) {
+      this.previousState = this.state;
+      this.state = 'Faulted';
+      return;
+    }
+
+    const transitions = statesDef.transitions[this.state];
+    if (!transitions) return;
+
+    for (const t of transitions) {
+      if (Math.random() < t.probability) {
+        this.previousState = this.state;
+        this.state = t.to;
+        return;
+      }
+    }
+  }
+}
+
+module.exports = DeviceInstance;
