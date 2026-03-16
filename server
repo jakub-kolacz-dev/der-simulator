@@ -1,0 +1,152 @@
+const Fastify = require('fastify');
+const fastifyWebsocket = require('@fastify/websocket');
+const fastifyCors = require('@fastify/cors');
+const DeviceStore = require('./device-store');
+const { registerRoutes } = require('./routes');
+
+async function buildServer() {
+  const app = Fastify({ logger: false });
+
+  await app.register(fastifyCors, { origin: true });
+  await app.register(fastifyWebsocket);
+
+  const historySize = parseInt(process.env.TELEMETRY_HISTORY_SIZE || '100', 10);
+  const store = new DeviceStore(historySize);
+
+  // ─── WS: Live clients (dashboardy, apki klienckie) ───
+  const liveClients = new Set();
+
+  store.onTelemetry = (deviceId, entry) => {
+    const msg = JSON.stringify({
+      type: 'telemetry',
+      deviceId,
+      ...entry,
+    });
+    for (const ws of liveClients) {
+      if (ws.readyState === 1) {
+        ws.send(msg);
+      } else {
+        liveClients.delete(ws);
+      }
+    }
+  };
+
+  // Live stream for client apps
+  app.register(async function (fastify) {
+    fastify.get('/ws/live', { websocket: true }, (socket, req) => {
+      liveClients.add(socket);
+      console.log(`🖥️  Live client connected (${liveClients.size} total)`);
+
+      socket.on('message', (raw) => {
+        // Klient może wysyłać komendy przez WS live
+        try {
+          const msg = JSON.parse(raw.toString());
+          if (msg.type === 'command' && msg.deviceId && msg.command) {
+            const cmd = store.createCommand(msg.deviceId, msg.command, msg.params || {});
+            socket.send(JSON.stringify({ type: 'command_ack', ...cmd }));
+          }
+          if (msg.type === 'subscribe_device') {
+            // Marker — w przyszłości filtrowanie per device
+            socket._subscribedDevices = msg.deviceIds || [];
+          }
+        } catch { /* ignore parse errors */ }
+      });
+
+      socket.on('close', () => {
+        liveClients.delete(socket);
+        console.log(`🖥️  Live client disconnected (${liveClients.size} total)`);
+      });
+    });
+  });
+
+  // ─── WS: Simulator connection ─────────────────
+  app.register(async function (fastify) {
+    fastify.get('/ws/simulator', { websocket: true }, (socket, req) => {
+      console.log('🔌 Simulator connected');
+
+      socket.on('message', (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString());
+
+          switch (msg.type) {
+            case 'register': {
+              // Symulator rejestruje urządzenie
+              store.registerDevice(msg.deviceId, msg.meta);
+              break;
+            }
+
+            case 'telemetry': {
+              // Symulator wysyła telemetrię
+              store.pushTelemetry(msg.deviceId, msg.data);
+              break;
+            }
+
+            case 'telemetry_batch': {
+              // Symulator wysyła batch telemetrii (wiele urządzeń naraz)
+              if (Array.isArray(msg.items)) {
+                for (const item of msg.items) {
+                  store.pushTelemetry(item.deviceId, item.data);
+                }
+              }
+              break;
+            }
+
+            case 'command_result': {
+              // Symulator odsyła wynik komendy
+              store.updateCommandResult(msg.commandId, msg.status, msg.result);
+              break;
+            }
+
+            case 'poll_commands': {
+              // Symulator pyta o pending komendy
+              const deviceId = msg.deviceId;
+              const pending = store.drainPendingCommands(deviceId);
+              if (pending.length > 0) {
+                socket.send(JSON.stringify({
+                  type: 'commands',
+                  deviceId,
+                  commands: pending,
+                }));
+              }
+              break;
+            }
+
+            case 'poll_commands_batch': {
+              // Batch poll — wiele urządzeń naraz
+              const allCommands = [];
+              for (const devId of (msg.deviceIds || [])) {
+                const pending = store.drainPendingCommands(devId);
+                for (const cmd of pending) {
+                  allCommands.push(cmd);
+                }
+              }
+              if (allCommands.length > 0) {
+                socket.send(JSON.stringify({
+                  type: 'commands_batch',
+                  commands: allCommands,
+                }));
+              }
+              break;
+            }
+
+            default:
+              break;
+          }
+        } catch (err) {
+          console.error('⚠️  Invalid message from simulator:', err.message);
+        }
+      });
+
+      socket.on('close', () => {
+        console.log('🔌 Simulator disconnected');
+      });
+    });
+  });
+
+  // ─── REST routes ──────────────────────────────
+  await registerRoutes(app, store);
+
+  return app;
+}
+
+module.exports = { buildServer };
