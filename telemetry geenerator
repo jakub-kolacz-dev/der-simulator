@@ -1,0 +1,117 @@
+class TelemetryGenerator {
+
+  constructor(telemetryDefs) {
+    this.defs = telemetryDefs;
+    this.accumulators = {};
+    this.overrides = {};
+
+    for (const [key, def] of Object.entries(this.defs)) {
+      if (def.type === 'accumulator') {
+        this.accumulators[key] = 0;
+      }
+    }
+  }
+
+  generate(currentState, deltaMs) {
+    const values = {};
+    const deltaSec = deltaMs / 1000;
+
+    // Pass 1 — prymitywy
+    for (const [key, def] of Object.entries(this.defs)) {
+      if (def.type === 'computed') continue;
+      values[key] = this._generateValue(key, def, currentState, deltaSec);
+    }
+
+    // Pass 2 — computed (formuły zależne od pass 1)
+    for (const [key, def] of Object.entries(this.defs)) {
+      if (def.type !== 'computed') continue;
+      values[key] = this._evaluateFormula(def.formula, values, def.precision);
+    }
+
+    return values;
+  }
+
+  _generateValue(key, def, state, deltaSec) {
+    switch (def.type) {
+      case 'constant':
+        return def.value;
+      case 'int':
+      case 'float':
+        return this._generateNumeric(key, def, state);
+      case 'accumulator':
+        return this._generateAccumulator(key, def, state, deltaSec);
+      default:
+        return 0;
+    }
+  }
+
+  _generateNumeric(key, def, state) {
+    if (def.zeroWhenStates?.includes(state)) return 0;
+
+    const max = this.overrides[key]?.max ?? def.max;
+    const min = def.min;
+
+    if (def.incrementWhenStates?.includes(state)) {
+      const [lo, hi] = def.incrementRange || [1, 1];
+      const prev = this.accumulators[`_n_${key}`] ?? min;
+      const next = Math.min(max, prev + this._rand(lo, hi));
+      this.accumulators[`_n_${key}`] = next;
+      return this._round(next, def.precision);
+    }
+
+    if (def.decrementWhenStates?.includes(state)) {
+      const [lo, hi] = def.decrementRange || [1, 1];
+      const prev = this.accumulators[`_n_${key}`] ?? max;
+      const next = Math.max(min, prev - this._rand(lo, hi));
+      this.accumulators[`_n_${key}`] = next;
+      return this._round(next, def.precision);
+    }
+
+    const val = this._rand(min, max);
+    return def.type === 'int' ? Math.round(val) : this._round(val, def.precision);
+  }
+
+  _generateAccumulator(key, def, state, deltaSec) {
+    if (def.resetOnStates?.includes(state)) {
+      this.accumulators[key] = 0;
+      return 0;
+    }
+    if (def.onlyWhenStates && !def.onlyWhenStates.includes(state)) {
+      return this._round(this.accumulators[key], def.precision);
+    }
+    this.accumulators[key] += (def.ratePerSecond || 0) * deltaSec;
+    return this._round(this.accumulators[key], def.precision);
+  }
+
+  _evaluateFormula(formula, values, precision) {
+    try {
+      let expr = formula;
+      // Sortuj klucze od najdłuższych żeby uniknąć partial replace
+      const keys = Object.keys(values).sort((a, b) => b.length - a.length);
+      for (const k of keys) {
+        expr = expr.replaceAll(k, String(values[k]));
+      }
+      const result = Function(`"use strict"; return (${expr})`)();
+      return this._round(isFinite(result) ? result : 0, precision ?? 2);
+    } catch {
+      return 0;
+    }
+  }
+
+  applyOverride(paramName, opts) {
+    if (!this.overrides[paramName]) this.overrides[paramName] = {};
+    if (opts.setMax !== undefined) this.overrides[paramName].max = opts.setMax;
+  }
+
+  _rand(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  _round(val, precision) {
+    if (precision == null) return val;
+    const f = 10 ** precision;
+    return Math.round(val * f) / f;
+  }
+}
+
+module.exports = TelemetryGenerator;
