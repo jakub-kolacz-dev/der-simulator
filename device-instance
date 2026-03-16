@@ -16,6 +16,9 @@ class DeviceInstance {
     this.commandDefs = definition.commands || {};
 
     this.lastTickAt = Date.now();
+
+    // Auto-load profili pasujących do tego typu urządzenia
+    this._autoLoadProfiles();
   }
 
   getRegistrationMeta() {
@@ -26,6 +29,9 @@ class DeviceInstance {
       manufacturer: this.meta.manufacturer,
       network: this.network,
       instanceIndex: this.instanceIndex,
+      availableCommands: Object.keys(this.commandDefs),
+      telemetryFields: Object.keys(this.definition.telemetry),
+      activeProfile: this.telemetryGen.activeProfile?.name || null,
     };
   }
 
@@ -41,6 +47,7 @@ class DeviceInstance {
     telemetry._deviceType = this.meta.deviceType;
     telemetry._protocol = this.meta.protocol;
     telemetry._network = this.network;
+    telemetry._activeProfile = this.telemetryGen.activeProfile?.name || null;
     telemetry._timestamp = new Date(now).toISOString();
 
     return telemetry;
@@ -55,32 +62,95 @@ class DeviceInstance {
     if (cmdDef.validFromStates && !cmdDef.validFromStates.includes(this.state)) {
       return {
         status: 'rejected',
-        result: `"${commandName}" invalid in state "${this.state}". Valid: ${cmdDef.validFromStates.join(', ')}`,
+        result: `"${commandName}" invalid in state "${this.state}"`,
       };
     }
 
     if (cmdDef.transitionTo) {
       this.previousState = this.state;
       this.state = cmdDef.transitionTo;
+      this.telemetryGen.onStateChange(this.state);
+      this._autoLoadProfiles();
     }
 
     if (cmdDef.effect && params) {
-      const paramName = cmdDef.effect.param;
       if (cmdDef.effect.setMax && params.value !== undefined) {
-        this.telemetryGen.applyOverride(paramName, { setMax: params.value });
+        this.telemetryGen.setOverride(cmdDef.effect.param, { max: params.value });
       }
     }
 
-    return {
-      status: 'ok',
-      result: `${commandName}: ${this.previousState} → ${this.state}`,
-    };
+    return { status: 'ok', result: `${commandName}: ${this.previousState} → ${this.state}` };
+  }
+
+  // ─── TELEMETRY CONFIG API ─────────────────────
+
+  setProfile(profileNameOrObj) {
+    this.telemetryGen.loadProfile(profileNameOrObj);
+  }
+
+  clearProfile() {
+    this.telemetryGen.clearProfile();
+  }
+
+  setFieldOverride(fieldName, override) {
+    this.telemetryGen.setOverride(fieldName, override);
+  }
+
+  clearFieldOverride(fieldName) {
+    this.telemetryGen.clearOverride(fieldName);
+  }
+
+  clearAllOverrides() {
+    this.telemetryGen.clearAllOverrides();
+  }
+
+  getFieldConfig(fieldName) {
+    return this.telemetryGen.getFieldConfig(fieldName);
+  }
+
+  getAllFieldConfigs() {
+    const configs = {};
+    for (const key of Object.keys(this.definition.telemetry)) {
+      configs[key] = this.telemetryGen.getFieldConfig(key);
+    }
+    return configs;
+  }
+
+  // ─── PRIVATE ──────────────────────────────────
+
+  _autoLoadProfiles() {
+    // Próbuj załadować profil pasujący do deviceType + state
+    const fs = require('fs');
+    const path = require('path');
+    const profilesDir = path.resolve(process.cwd(), 'profiles');
+
+    if (!fs.existsSync(profilesDir)) return;
+
+    const files = fs.readdirSync(profilesDir).filter((f) => f.endsWith('.yaml'));
+    const yaml = require('js-yaml');
+
+    for (const file of files) {
+      try {
+        const profile = yaml.load(fs.readFileSync(path.join(profilesDir, file), 'utf8'));
+        const applies = profile.appliesTo;
+        if (
+          applies &&
+          applies.deviceType === this.meta.deviceType &&
+          applies.states?.includes(this.state)
+        ) {
+          this.telemetryGen.loadProfile(profile);
+          return;
+        }
+      } catch { /* skip invalid profiles */ }
+    }
+
+    // Brak profilu dla tego stanu — fallback na bazowy generator
+    this.telemetryGen.clearProfile();
   }
 
   _transitionState() {
     const statesDef = this.definition.states;
 
-    // Losowy fault
     if (
       statesDef.faultProbability &&
       statesDef.faultFromStates?.includes(this.state) &&
@@ -88,6 +158,8 @@ class DeviceInstance {
     ) {
       this.previousState = this.state;
       this.state = 'Faulted';
+      this.telemetryGen.onStateChange(this.state);
+      this._autoLoadProfiles();
       return;
     }
 
@@ -98,6 +170,8 @@ class DeviceInstance {
       if (Math.random() < t.probability) {
         this.previousState = this.state;
         this.state = t.to;
+        this.telemetryGen.onStateChange(this.state);
+        this._autoLoadProfiles();
         return;
       }
     }
