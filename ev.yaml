@@ -1,0 +1,79 @@
+metadata:
+  deviceType: EV
+  description: "Electric Vehicle"
+  protocol: ISO-15118
+  manufacturer: "SimMotors"
+
+telemetry:
+  soc_percent:
+    type: float
+    min: 0
+    max: 100
+    precision: 1
+    unit: "%"
+    decrementWhenStates: [Driving]
+    decrementRange: [0.1, 0.5]
+    incrementWhenStates: [Charging]
+    incrementRange: [0.5, 2.0]
+
+  battery_voltage_V:
+    type: float
+    min: 340
+    max: 410
+    precision: 1
+    unit: V
+
+  battery_current_A:
+    type: float
+    min: -150
+    max: 150
+    precision: 1
+    unit: A
+    zeroWhenStates: [Parked, Idle]
+
+  battery_temp_C:
+    type: float
+    min: 15
+    max: 45
+    precision: 1
+    unit: "°C"
+
+  odometer_km:
+    type: accumulator
+    ratePerSecond: 0.01
+    precision: 1
+    unit: km
+    onlyWhenStates: [Driving]
+
+  cabin_temp_C:
+    type: float
+    min: 18
+    max: 28
+    precision: 1
+    unit: "°C"
+
+states:
+  initial: Parked
+  transitions:
+    Parked:
+      - to: Driving
+        probability: 0.03
+      - to: Charging
+        probability: 0.05
+    Driving:
+      - to: Parked
+        probability: 0.02
+    Charging:
+      - to: Parked
+        probability: 0.04
+    Idle:
+      - to: Parked
+        probability: 0.3
+
+commands:
+  start_charge:
+    validFromStates: [Parked]
+    transitionTo: Charging
+  stop_charge:
+    validFromStates: [Charging]
+    transitionTo: Parked
