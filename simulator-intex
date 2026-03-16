@@ -1,0 +1,27 @@
+require('dotenv').config();
+const SimulatorEngine = require('./engine');
+
+const config = {
+  backendWsUrl: process.env.BACKEND_WS_URL || 'ws://localhost:3000/ws/simulator',
+  fleetFile: process.env.FLEET_FILE || 'fleet.yaml',
+  intervalMs: parseInt(process.env.TELEMETRY_INTERVAL_MS || '5000', 10),
+  logLevel: process.env.LOG_LEVEL || 'info',
+};
+
+async function main() {
+  const engine = new SimulatorEngine(config);
+
+  process.on('SIGINT', () => { engine.stop(); process.exit(0); });
+  process.on('SIGTERM', () => { engine.stop(); process.exit(0); });
+
+  try {
+    await engine.init();
+    engine.start();
+  } catch (err) {
+    console.error('💥 Fatal:', err.message);
+    console.error(err.stack);
+    process.exit(1);
+  }
+}
+
+main();
