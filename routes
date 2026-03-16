@@ -1,0 +1,116 @@
+/**
+ * REST API routes
+ */
+async function registerRoutes(app, store) {
+
+  // ─── DASHBOARD / STATS ────────────────────────
+
+  app.get('/api/stats', async () => {
+    return store.getStats();
+  });
+
+  // ─── DEVICES ──────────────────────────────────
+
+  app.get('/api/devices', async (req) => {
+    const { type, state, network } = req.query;
+    return store.listDevices({ type, state, network });
+  });
+
+  app.get('/api/devices/:deviceId', async (req, reply) => {
+    const device = store.getDevice(req.params.deviceId);
+    if (!device) return reply.code(404).send({ error: 'Device not found' });
+    return { deviceId: req.params.deviceId, ...device };
+  });
+
+  // ─── TELEMETRY ────────────────────────────────
+
+  app.get('/api/devices/:deviceId/telemetry', async (req, reply) => {
+    const device = store.getDevice(req.params.deviceId);
+    if (!device) return reply.code(404).send({ error: 'Device not found' });
+    return device.lastTelemetry || { data: null };
+  });
+
+  app.get('/api/devices/:deviceId/telemetry/history', async (req, reply) => {
+    const limit = parseInt(req.query.limit || '50', 10);
+    const device = store.getDevice(req.params.deviceId);
+    if (!device) return reply.code(404).send({ error: 'Device not found' });
+    return store.getHistory(req.params.deviceId, limit);
+  });
+
+  // ─── COMMANDS ─────────────────────────────────
+
+  app.post('/api/devices/:deviceId/command', async (req, reply) => {
+    const { deviceId } = req.params;
+    const { command, params } = req.body || {};
+
+    if (!command) {
+      return reply.code(400).send({ error: 'Field "command" is required' });
+    }
+
+    const device = store.getDevice(deviceId);
+    if (!device) return reply.code(404).send({ error: 'Device not found' });
+
+    const cmd = store.createCommand(deviceId, command, params || {});
+    return reply.code(201).send(cmd);
+  });
+
+  app.get('/api/devices/:deviceId/commands', async (req) => {
+    const limit = parseInt(req.query.limit || '50', 10);
+    return store.listCommands(req.params.deviceId, limit);
+  });
+
+  app.get('/api/commands/:commandId', async (req, reply) => {
+    const cmd = store.getCommand(parseInt(req.params.commandId, 10));
+    if (!cmd) return reply.code(404).send({ error: 'Command not found' });
+    return cmd;
+  });
+
+  // ─── BULK ─────────────────────────────────────
+
+  app.post('/api/commands/bulk', async (req, reply) => {
+    const { deviceIds, command, params } = req.body || {};
+    if (!command || !Array.isArray(deviceIds)) {
+      return reply.code(400).send({ error: 'Fields "deviceIds" (array) and "command" are required' });
+    }
+
+    const results = deviceIds.map((deviceId) => {
+      const device = store.getDevice(deviceId);
+      if (!device) return { deviceId, error: 'Not found' };
+      return store.createCommand(deviceId, command, params || {});
+    });
+
+    return reply.code(201).send(results);
+  });
+
+  // ─── FLEET OVERVIEW ───────────────────────────
+
+  app.get('/api/fleet', async () => {
+    const devices = store.listDevices();
+    const grouped = {};
+
+    for (const d of devices) {
+      const type = d.meta?.deviceType || 'Unknown';
+      if (!grouped[type]) {
+        grouped[type] = {
+          deviceType: type,
+          protocol: d.meta?.protocol,
+          count: 0,
+          states: {},
+          devices: [],
+        };
+      }
+      grouped[type].count++;
+      const st = d.state || 'Unknown';
+      grouped[type].states[st] = (grouped[type].states[st] || 0) + 1;
+      grouped[type].devices.push({
+        deviceId: d.deviceId,
+        state: d.state,
+        updatedAt: d.updatedAt,
+      });
+    }
+
+    return Object.values(grouped);
+  });
+}
+
+module.exports = { registerRoutes };
